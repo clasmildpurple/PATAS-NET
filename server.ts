@@ -1204,13 +1204,14 @@ app.get('/api/dev/db', (req, res) => {
     passwords: passwordsDb,
     companySettings,
     coverageList,
-    packages: packagesList
+    packages: packagesList,
+    testimonials: testimonialsList
   });
 });
 
 // Save raw database overrides from developer terminal
 app.post('/api/dev/db/save', (req, res) => {
-  const { customers, tickets, passwords, settings } = req.body;
+  const { customers, tickets, passwords, settings, packages, coverage, testimonials } = req.body;
   
   if (customers) {
     customersList = customers;
@@ -1228,9 +1229,74 @@ app.post('/api/dev/db/save', (req, res) => {
     Object.assign(companySettings, settings);
     saveSettings();
   }
+  if (packages) {
+    packagesList = packages;
+    savePackages();
+  }
+  if (coverage) {
+    coverageList = coverage;
+    saveCoverage();
+  }
+  if (testimonials) {
+    testimonialsList = testimonials;
+    saveTestimonials();
+  }
 
   res.json({ status: 'success', message: 'Raw database override success!' });
 });
+
+// Server-side Apps Script sync on boot
+async function syncWithAppsScriptOnServerStartup() {
+  const webhookUrl = process.env.VITE_APP_SCRIPT_URL || process.env.APP_SCRIPT_URL || (companySettings as any)?.appScriptWebhookUrl || '';
+  if (!webhookUrl) {
+    console.log('[Server Startup Sync] No Google Apps Script URL environment variable or setting configured.');
+    return;
+  }
+  console.log('[Server Startup Sync] Fetching master database from Google Sheets...', webhookUrl);
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'load' })
+    });
+    if (res.ok) {
+      const data = await res.json() as any;
+      if (data && data.status === 'success') {
+        console.log('[Server Startup Sync] Successfully restored entire database from Google Sheets!');
+        if (data.companySettings) {
+          companySettings = { ...data.companySettings, appScriptWebhookUrl: webhookUrl };
+          saveSettings();
+        }
+        if (Array.isArray(data.customers)) {
+          customersList = data.customers;
+          saveCustomers();
+        }
+        if (Array.isArray(data.tickets)) {
+          supportTicketsList = data.tickets;
+          saveTickets();
+        }
+        if (Array.isArray(data.packages)) {
+          packagesList = data.packages;
+          savePackages();
+        }
+        if (Array.isArray(data.coverage)) {
+          coverageList = data.coverage;
+          saveCoverage();
+        }
+        if (Array.isArray(data.testimonials)) {
+          testimonialsList = data.testimonials;
+          saveTestimonials();
+        }
+      } else {
+        console.warn('[Server Startup Sync] Google Sheets answered but status is not success.');
+      }
+    } else {
+      console.warn('[Server Startup Sync] Google Sheets connection rejected with status:', res.status);
+    }
+  } catch (err: any) {
+    console.error('[Server Startup Sync] Failed to connect to Google Sheets:', err.message || err);
+  }
+}
 
 // Start listening or initialize Vite dev server
 async function startServer() {
@@ -1250,6 +1316,8 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
+    // Sync with Google Sheets as soon as server starts
+    syncWithAppsScriptOnServerStartup();
   });
 }
 

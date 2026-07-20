@@ -10,7 +10,7 @@ import DeveloperDashboard from './components/DeveloperDashboard';
 import PrivacyPolicy from './components/PrivacyPolicy';
 import TermsConditions from './components/TermsConditions';
 import { CustomerUser, SupportTicket } from './types';
-import { ShieldAlert, User, CheckCircle, Wifi, AlertCircle, Eye, EyeOff } from 'lucide-react';
+import { ShieldAlert, User, CheckCircle, Wifi, AlertCircle, Eye, EyeOff, Database, RefreshCw } from 'lucide-react';
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<string>('home');
@@ -52,7 +52,9 @@ export default function App() {
       const response = await fetch('/api/packages');
       if (response.ok) {
         const data = await response.json();
-        setPackages(data.packages || []);
+        const pkgs = data.packages || [];
+        setPackages(pkgs);
+        localStorage.setItem('db_packages', JSON.stringify(pkgs));
       }
     } catch (err) {
       console.error('Failed to fetch packages:', err);
@@ -68,6 +70,7 @@ export default function App() {
       if (response.ok) {
         const data = await response.json();
         if (Array.isArray(data)) {
+          localStorage.setItem('db_coverage_areas', JSON.stringify(data));
           let cities = data.length;
           let kecamatans = 0;
           let kelurahans = 0;
@@ -100,6 +103,77 @@ export default function App() {
   // Form registration success message
   const [registrationSuccessUser, setRegistrationSuccessUser] = useState<CustomerUser | null>(null);
 
+  // Google Sheets Cloud Synchronization states & action
+  const [syncUrlInput, setSyncUrlInput] = useState('');
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncSuccessMessage, setSyncSuccessMessage] = useState('');
+
+  const handleLinkAndSyncDatabase = async () => {
+    setSyncSuccessMessage('');
+    setLoginError('');
+    if (!syncUrlInput.trim()) {
+      setLoginError('Harap masukkan URL Web App Google Apps Script Anda.');
+      return;
+    }
+    if (!syncUrlInput.startsWith('https://script.google.com/')) {
+      setLoginError('Format URL salah. Harus diawali dengan https://script.google.com/');
+      return;
+    }
+
+    setSyncLoading(true);
+    try {
+      const response = await fetch(syncUrlInput.trim(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'load' })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.status === 'success') {
+          if (data.companySettings) {
+            const updatedSettings = { ...data.companySettings, appScriptWebhookUrl: syncUrlInput.trim() };
+            localStorage.setItem('db_company_settings', JSON.stringify(updatedSettings));
+            setCompanySettings(updatedSettings);
+          } else {
+            const fallbackSettings = { ...companySettings, appScriptWebhookUrl: syncUrlInput.trim() };
+            localStorage.setItem('db_company_settings', JSON.stringify(fallbackSettings));
+            setCompanySettings(fallbackSettings);
+          }
+          if (Array.isArray(data.customers)) {
+            localStorage.setItem('db_customers', JSON.stringify(data.customers));
+          }
+          if (Array.isArray(data.tickets)) {
+            localStorage.setItem('db_tickets', JSON.stringify(data.tickets));
+          }
+          if (Array.isArray(data.packages)) {
+            localStorage.setItem('db_packages', JSON.stringify(data.packages));
+          }
+          if (Array.isArray(data.coverage)) {
+            localStorage.setItem('db_coverage_areas', JSON.stringify(data.coverage));
+          }
+          if (Array.isArray(data.testimonials)) {
+            localStorage.setItem('db_testimonials', JSON.stringify(data.testimonials));
+          }
+
+          // Trigger local storage event to notify current active state
+          window.dispatchEvent(new Event('storage'));
+          setSyncSuccessMessage('Database Berhasil Sinkron! Seluruh pelanggan, tagihan, tiket, paket, dan kustomisasi berhasil dimuat.');
+          setSyncUrlInput('');
+        } else {
+          setLoginError('Google Sheets membalas dengan status tidak sukses. Periksa kembali script Anda.');
+        }
+      } else {
+        setLoginError(`Koneksi ditolak oleh Google Apps Script (Status: ${response.status}). Pastikan Web App Anda di-deploy dengan akses "Anyone" (Siapa saja).`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setLoginError(`Gagal menghubungi server database Google Sheets: ${err.message || 'Harap periksa CORS atau izin akses Web App Anda.'}`);
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   // Fetch company branding settings on mount
   const fetchCompanySettings = async () => {
     try {
@@ -109,6 +183,7 @@ export default function App() {
         const settings = data.settings || data;
         if (settings) {
           setCompanySettings(settings);
+          localStorage.setItem('db_company_settings', JSON.stringify(settings));
         }
       }
     } catch (err) {
@@ -148,6 +223,17 @@ export default function App() {
     fetchCompanySettings();
     fetchPackages();
     fetchCoverageStats();
+
+    const handleStorageSync = () => {
+      fetchCompanySettings();
+      fetchPackages();
+      fetchCoverageStats();
+    };
+
+    window.addEventListener('storage', handleStorageSync);
+    return () => {
+      window.removeEventListener('storage', handleStorageSync);
+    };
   }, []);
 
   // Auto scroll to top on page change
@@ -164,6 +250,13 @@ export default function App() {
         setAdminCustomers(data.customers || []);
         setAdminSupportTickets(data.tickets || []);
         setAdminWhatsappLogs(data.whatsappLogs || []);
+        
+        // Sync with local storage
+        localStorage.setItem('db_customers', JSON.stringify(data.customers || []));
+        localStorage.setItem('db_tickets', JSON.stringify(data.tickets || []));
+        if (data.whatsappLogs) {
+          localStorage.setItem('db_whatsapp_logs', JSON.stringify(data.whatsappLogs));
+        }
       }
       // Also fetch latest company settings and coverage statistics so everything is real-time
       await fetchCompanySettings();
@@ -179,6 +272,21 @@ export default function App() {
       if (response.ok) {
         const data = await response.json();
         setCurrentUser(data.user);
+        
+        // Update local customers store with this refreshed customer profile
+        const localCustomersRaw = localStorage.getItem('db_customers');
+        let localCustomers: any[] = [];
+        try {
+          localCustomers = localCustomersRaw ? JSON.parse(localCustomersRaw) : [];
+        } catch {}
+        if (!Array.isArray(localCustomers)) localCustomers = [];
+        const index = localCustomers.findIndex((c: any) => c.id === id);
+        if (index > -1) {
+          localCustomers[index] = data.user;
+        } else {
+          localCustomers.push(data.user);
+        }
+        localStorage.setItem('db_customers', JSON.stringify(localCustomers));
       }
     } catch (err) {
       console.error('Failed to sync customer data:', err);

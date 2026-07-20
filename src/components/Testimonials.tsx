@@ -70,6 +70,7 @@ export default function Testimonials({ companyName = 'Taranet WiFi' }: { company
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {
           setTestimonialsList(data);
+          localStorage.setItem('db_testimonials', JSON.stringify(data));
         }
       })
       .catch((err) => {

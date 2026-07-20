@@ -332,9 +332,127 @@ function getStorage<T>(key: string, seed: T): T {
   return seed;
 }
 
+let backupTimeout: any = null;
+
+async function triggerClientAutoBackup() {
+  const settings = getStorage('company_settings', SEED_COMPANY_SETTINGS);
+  const webhookUrl = settings.appScriptWebhookUrl || ((import.meta as any).env?.VITE_APP_SCRIPT_URL as string) || '';
+  if (!webhookUrl) return;
+
+  const packages = getStorage('packages', SEED_PACKAGES);
+  const coverage = getStorage('coverage_areas', SEED_COVERAGE_AREAS);
+  const customers = getStorage('customers', SEED_CUSTOMERS);
+  const tickets = getStorage('tickets', SEED_TICKETS);
+  const testimonials = getStorage('testimonials', SEED_TESTIMONIALS);
+
+  const payload = {
+    action: 'backup',
+    timestamp: new Date().toISOString(),
+    companySettings: settings,
+    customers,
+    tickets,
+    packages,
+    coverage,
+    testimonials
+  };
+
+  try {
+    const res = await ORIGINAL_FETCH(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      console.log('[Client Sync] Backup successfully synchronized to Google Sheets.');
+    }
+  } catch (err) {
+    console.error('[Client Sync] Backup failed:', err);
+  }
+}
+
+function queueClientAutoBackup() {
+  if (backupTimeout) clearTimeout(backupTimeout);
+  backupTimeout = setTimeout(() => {
+    triggerClientAutoBackup();
+  }, 1500);
+}
+
 function setStorage<T>(key: string, val: T): void {
   localStorage.setItem(`db_${key}`, JSON.stringify(val));
+  if (key !== 'whatsapp_logs' && key !== 'passwords') {
+    queueClientAutoBackup();
+  }
 }
+
+let initialSyncDone = false;
+
+export async function syncWithAppsScriptOnStartup() {
+  if (initialSyncDone) return;
+  initialSyncDone = true;
+  
+  let webhookUrl = '';
+  try {
+    const settingsRaw = localStorage.getItem('db_company_settings');
+    if (settingsRaw) {
+      const settings = JSON.parse(settingsRaw);
+      webhookUrl = settings.appScriptWebhookUrl || '';
+    }
+  } catch {}
+  
+  if (!webhookUrl) {
+    webhookUrl = ((import.meta as any).env?.VITE_APP_SCRIPT_URL as string) || '';
+  }
+  
+  if (!webhookUrl) {
+    console.log('[Startup Sync] No Google Apps Script URL configured.');
+    return;
+  }
+  
+  console.log('[Startup Sync] Connecting to Apps Script to restore database...', webhookUrl);
+  
+  try {
+    const res = await ORIGINAL_FETCH(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'load' })
+    });
+    
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.status === 'success') {
+        console.log('[Startup Sync] Google Sheet data retrieved successfully! Synchronizing local storage...');
+        
+        if (data.companySettings) {
+          const updatedSettings = { ...data.companySettings, appScriptWebhookUrl: webhookUrl };
+          localStorage.setItem('db_company_settings', JSON.stringify(updatedSettings));
+        }
+        if (Array.isArray(data.customers)) {
+          localStorage.setItem('db_customers', JSON.stringify(data.customers));
+        }
+        if (Array.isArray(data.tickets)) {
+          localStorage.setItem('db_tickets', JSON.stringify(data.tickets));
+        }
+        if (Array.isArray(data.packages)) {
+          localStorage.setItem('db_packages', JSON.stringify(data.packages));
+        }
+        if (Array.isArray(data.coverage)) {
+          localStorage.setItem('db_coverage_areas', JSON.stringify(data.coverage));
+        }
+        if (Array.isArray(data.testimonials)) {
+          localStorage.setItem('db_testimonials', JSON.stringify(data.testimonials));
+        }
+        
+        // Dispatch local storage event so React can pull the newly fetched variables
+        window.dispatchEvent(new Event('storage'));
+      }
+    }
+  } catch (err) {
+    console.error('[Startup Sync] Error during startup database restore:', err);
+  }
+}
+
+// Run the startup sync in background on module load
+syncWithAppsScriptOnStartup();
 
 // Global fetch interceptor
 try {

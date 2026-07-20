@@ -28,6 +28,9 @@ export default function DeveloperDashboard({ onLogout, companyName }: DeveloperD
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [appScriptUrl, setAppScriptUrl] = useState('');
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncSuccessMessage, setSyncSuccessMessage] = useState('');
+  const [syncErrorMessage, setSyncErrorMessage] = useState('');
 
   // JSON editor draft strings
   const [jsonDrafts, setJsonDrafts] = useState<{
@@ -185,52 +188,495 @@ export default function DeveloperDashboard({ onLogout, companyName }: DeveloperD
     }
   };
 
+  const handleLinkAndSyncDatabase = async () => {
+    setSyncSuccessMessage('');
+    setSyncErrorMessage('');
+    if (!appScriptUrl.trim()) {
+      setSyncErrorMessage('Harap masukkan URL Web App Google Apps Script Anda.');
+      return;
+    }
+    if (!appScriptUrl.trim().startsWith('https://script.google.com/')) {
+      setSyncErrorMessage('Format URL salah. Harus diawali dengan https://script.google.com/');
+      return;
+    }
+
+    setSyncLoading(true);
+    try {
+      const response = await fetch(appScriptUrl.trim(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'load' })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.status === 'success') {
+          // 1. Update localStorage
+          if (data.companySettings) {
+            const updatedSettings = { ...data.companySettings, appScriptWebhookUrl: appScriptUrl.trim() };
+            localStorage.setItem('db_company_settings', JSON.stringify(updatedSettings));
+          } else {
+            const fallbackSettings = { name: companyName, appScriptWebhookUrl: appScriptUrl.trim() };
+            localStorage.setItem('db_company_settings', JSON.stringify(fallbackSettings));
+          }
+          if (Array.isArray(data.customers)) {
+            localStorage.setItem('db_customers', JSON.stringify(data.customers));
+          }
+          if (Array.isArray(data.tickets)) {
+            localStorage.setItem('db_tickets', JSON.stringify(data.tickets));
+          }
+          if (Array.isArray(data.packages)) {
+            localStorage.setItem('db_packages', JSON.stringify(data.packages));
+          }
+          if (Array.isArray(data.coverage)) {
+            localStorage.setItem('db_coverage_areas', JSON.stringify(data.coverage));
+          }
+          if (Array.isArray(data.testimonials)) {
+            localStorage.setItem('db_testimonials', JSON.stringify(data.testimonials));
+          }
+
+          // 2. Sync to backend server
+          const saveBody: any = {};
+          if (data.companySettings) {
+            saveBody.settings = { ...data.companySettings, appScriptWebhookUrl: appScriptUrl.trim() };
+          } else {
+            saveBody.settings = { appScriptWebhookUrl: appScriptUrl.trim() };
+          }
+          if (Array.isArray(data.customers)) {
+            saveBody.customers = data.customers;
+          }
+          if (Array.isArray(data.tickets)) {
+            saveBody.tickets = data.tickets;
+          }
+          if (Array.isArray(data.packages)) {
+            saveBody.packages = data.packages;
+          }
+          if (Array.isArray(data.coverage)) {
+            saveBody.coverage = data.coverage;
+          }
+          if (Array.isArray(data.testimonials)) {
+            saveBody.testimonials = data.testimonials;
+          }
+
+          const saveRes = await fetch('/api/dev/db/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(saveBody)
+          });
+
+          if (!saveRes.ok) {
+            console.warn('Gagal menyimpan sinkronisasi ke server, tetapi local storage berhasil diperbarui.');
+          }
+
+          // Trigger local storage event to notify current active state
+          window.dispatchEvent(new Event('storage'));
+          setSyncSuccessMessage('Database Berhasil Sinkron! Seluruh pelanggan, tagihan, tiket, paket, cakupan wilayah, dan kustomisasi berhasil dimuat.');
+          
+          // Reload local states inside Developer Dashboard
+          await fetchDatabase();
+        } else {
+          setSyncErrorMessage('Google Sheets membalas dengan status tidak sukses. Periksa kembali script Anda.');
+        }
+      } else {
+        setSyncErrorMessage(`Koneksi ditolak oleh Google Apps Script (Status: ${response.status}). Pastikan Web App Anda di-deploy dengan akses "Anyone" (Siapa saja).`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setSyncErrorMessage(`Gagal menghubungi server database Google Sheets: ${err.message || 'Harap periksa CORS atau izin akses Web App Anda.'}`);
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   const handleCopyAppsScript = () => {
     const scriptCode = `/**
- * Google Apps Script Web App Template
+ * Google Apps Script Web App Template (Patasnet / Taranet WiFi)
  * Copy and deploy this code in script.google.com as a Web App to integrate Google Sheets & Drive!
+ * This script will AUTOMATICALLY create all necessary sheets and columns on its first execution!
  */
 
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
     
-    // Save to Google Sheets
-    sheet.appendRow([
-      new Date(),
-      data.name,
-      data.email,
-      data.phone,
-      data.address,
-      data.coordinates ? data.coordinates.join(', ') : '',
-      data.packageId,
-      data.rentStb ? 'Yes' : 'No'
-    ]);
+    // Support retrieving the complete database to synchronize new devices
+    if (data.action === "load") {
+      var result = {
+        status: "success",
+        message: "Data loaded successfully from Spreadsheet!"
+      };
+      
+      // Read Pengaturan_Sistem
+      var sheetSettings = ss.getSheetByName("Pengaturan_Sistem");
+      if (sheetSettings && sheetSettings.getLastRow() >= 2) {
+        var row = sheetSettings.getRange(2, 1, 1, 7).getValues()[0];
+        result.companySettings = {
+          name: row[0] || "",
+          address: row[1] || "",
+          logoText: row[2] || "",
+          themeColor: row[3] || "",
+          tagline: row[4] || "",
+          billingDate: Number(row[5]) || 20,
+          contactPhone: row[6] || ""
+        };
+      }
+      
+      // Read Pelanggan & Tagihan_Pembayaran
+      var sheetCustomers = ss.getSheetByName("Pelanggan");
+      var customers = [];
+      if (sheetCustomers && sheetCustomers.getLastRow() >= 2) {
+        var rows = sheetCustomers.getRange(2, 1, sheetCustomers.getLastRow() - 1, 10).getValues();
+        customers = rows.map(function(r) {
+          var coords = [-6.2088, 106.8456];
+          if (r[5]) {
+            var parts = r[5].toString().split(",");
+            if (parts.length === 2) {
+              coords = [Number(parts[0]) || -6.2088, Number(parts[1]) || 106.8456];
+            }
+          }
+          return {
+            id: r[0] || "",
+            name: r[1] || "",
+            email: r[2] || "",
+            phone: r[3] || "",
+            address: r[4] || "",
+            coordinates: coords,
+            packageId: r[6] || "",
+            status: r[7] || "",
+            createdAt: r[8] || "",
+            ktpImageUrl: r[9] || "",
+            payments: []
+          };
+        });
+      }
+      
+      var sheetPayments = ss.getSheetByName("Tagihan_Pembayaran");
+      if (sheetPayments && sheetPayments.getLastRow() >= 2) {
+        var pRows = sheetPayments.getRange(2, 1, sheetPayments.getLastRow() - 1, 10).getValues();
+        pRows.forEach(function(r) {
+          var pId = r[0] || "";
+          var custId = r[1] || "";
+          var pDate = r[3] || "";
+          var pAmount = Number(r[4]) || 0;
+          var pStatus = r[5] || "";
+          var pPeriod = r[6] || "";
+          var pMethod = r[7] || "";
+          var pTxId = r[8] || "";
+          var pProof = r[9] || "";
+          
+          var cust = customers.find(function(c) { return c.id === custId; });
+          if (cust) {
+            cust.payments.push({
+              id: pId,
+              date: pDate,
+              amount: pAmount,
+              status: pStatus,
+              billingPeriod: pPeriod,
+              method: pMethod,
+              transactionId: pTxId,
+              proofOfPaymentUrl: pProof
+            });
+          }
+        });
+      }
+      result.customers = customers;
+      
+      // Read Tiket_Dukungan
+      var sheetTickets = ss.getSheetByName("Tiket_Dukungan");
+      var tickets = [];
+      if (sheetTickets && sheetTickets.getLastRow() >= 2) {
+        var tRows = sheetTickets.getRange(2, 1, sheetTickets.getLastRow() - 1, 8).getValues();
+        tickets = tRows.map(function(r) {
+          return {
+            id: r[0] || "",
+            userId: r[1] || "",
+            userName: r[2] || "",
+            email: r[3] || "",
+            phone: r[4] || "",
+            message: r[5] || "",
+            date: r[6] || "",
+            status: r[7] || ""
+          };
+        });
+      }
+      result.tickets = tickets;
+      
+      // Read Paket_Internet
+      var sheetPackages = ss.getSheetByName("Paket_Internet");
+      var packages = [];
+      if (sheetPackages && sheetPackages.getLastRow() >= 2) {
+        var pkgRows = sheetPackages.getRange(2, 1, sheetPackages.getLastRow() - 1, 7).getValues();
+        packages = pkgRows.map(function(r) {
+          return {
+            id: r[0] || "",
+            name: r[1] || "",
+            speed: r[2] || "",
+            price: Number(r[3]) || 0,
+            type: r[4] || "home",
+            features: r[5] ? r[5].toString().split(",").map(function(f) { return f.trim(); }) : [],
+            popular: r[6] === "Ya"
+          };
+        });
+      }
+      result.packages = packages;
+      
+      // Read Cakupan_Wilayah
+      var sheetCoverage = ss.getSheetByName("Cakupan_Wilayah");
+      var coverage = [];
+      if (sheetCoverage && sheetCoverage.getLastRow() >= 2) {
+        var covRows = sheetCoverage.getRange(2, 1, sheetCoverage.getLastRow() - 1, 4).getValues();
+        coverage = covRows.map(function(r) {
+          return {
+            cityName: r[0] || "",
+            regionType: r[1] || "Kota",
+            totalKecamatan: Number(r[2]) || 0,
+            totalKelurahan: Number(r[3]) || 0,
+            kecamatans: []
+          };
+        });
+      }
+      result.coverage = coverage;
+      
+      // Read Testimoni_Pelanggan
+      var sheetTestimonials = ss.getSheetByName("Testimoni_Pelanggan");
+      var testimonials = [];
+      if (sheetTestimonials && sheetTestimonials.getLastRow() >= 2) {
+        var testiRows = sheetTestimonials.getRange(2, 1, sheetTestimonials.getLastRow() - 1, 8).getValues();
+        testimonials = testiRows.map(function(r) {
+          return {
+            id: r[0] || "",
+            name: r[1] || "",
+            role: r[2] || "",
+            location: r[3] || "",
+            rating: Number(r[4]) || 5,
+            text: r[5] || "",
+            tag: r[6] || "",
+            createdAt: r[7] || ""
+          };
+        });
+      }
+      result.testimonials = testimonials;
+      
+      return ContentService.createTextOutput(JSON.stringify(result))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
     
-    // If KTP Image Base64 is sent, save to Google Drive
-    if (data.ktpImageBase64) {
-      var folder = DriveApp.getFoldersByName("Taranet_KTP_Uploads");
-      var targetFolder = folder.hasNext() ? folder.next() : DriveApp.createFolder("Taranet_KTP_Uploads");
+    // Helper function to insert a sheet if missing and setup styling and headers
+    function getOrCreateSheet(name, headers) {
+      var sheet = ss.getSheetByName(name);
+      if (!sheet) {
+        sheet = ss.insertSheet(name);
+        sheet.appendRow(headers);
+        
+        // Format headers: bold, background slate, text white
+        var headerRange = sheet.getRange(1, 1, 1, headers.length);
+        headerRange.setFontWeight("bold");
+        headerRange.setBackground("#0f172a"); // slate-900
+        headerRange.setFontColor("#f8fafc");  // slate-50
+        sheet.setFrozenRows(1);
+      }
+      return sheet;
+    }
+    
+    // 1. SYSTEM CONFIGURATION SHEET
+    if (data.companySettings) {
+      var sheetSettings = getOrCreateSheet("Pengaturan_Sistem", [
+        "Nama Perusahaan", "Alamat Kantor", "Teks Logo", "Warna Tema", "Tagline", "Tanggal Jatuh Tempo", "No Kontak Telepon", "Terakhir Diperbarui"
+      ]);
+      // Remove stale data, keep header
+      if (sheetSettings.getLastRow() > 1) {
+        sheetSettings.deleteRows(2, sheetSettings.getLastRow() - 1);
+      }
+      var s = data.companySettings;
+      sheetSettings.appendRow([
+        s.name || "",
+        s.address || "",
+        s.logoText || "",
+        s.themeColor || "",
+        s.tagline || "",
+        s.billingDate || "",
+        s.contactPhone || "",
+        new Date().toLocaleString("id-ID")
+      ]);
+    }
+    
+    // 2. CUSTOMER LIST & BILLING PAYMENTS
+    if (data.customers) {
+      var sheetCustomers = getOrCreateSheet("Pelanggan", [
+        "ID Pelanggan", "Nama Lengkap", "Email", "Nomor Handphone", "Alamat Rumah", "Koordinat GPS", "ID Paket", "Status Akun", "Tanggal Daftar", "Tautan Foto KTP"
+      ]);
+      var sheetPayments = getOrCreateSheet("Tagihan_Pembayaran", [
+        "ID Pembayaran", "ID Pelanggan", "Nama Pelanggan", "Tanggal Transaksi", "Jumlah Rp", "Status", "Periode", "Metode", "ID Transaksi", "Tautan Bukti Bayar"
+      ]);
       
-      var base64Data = data.ktpImageBase64.split(",")[1];
-      var contentType = data.ktpImageBase64.split(",")[0].split(":")[1].split(";")[0];
-      var decoded = Utilities.base64Decode(base64Data);
-      var blob = Utilities.newBlob(decoded, contentType, "KTP_" + data.name + ".jpg");
+      if (sheetCustomers.getLastRow() > 1) {
+        sheetCustomers.deleteRows(2, sheetCustomers.getLastRow() - 1);
+      }
+      if (sheetPayments.getLastRow() > 1) {
+        sheetPayments.deleteRows(2, sheetPayments.getLastRow() - 1);
+      }
       
-      var file = targetFolder.createFile(blob);
-      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      data.customers.forEach(function(c) {
+        sheetCustomers.appendRow([
+          c.id || "",
+          c.name || "",
+          c.email || "",
+          c.phone || "",
+          c.address || "",
+          c.coordinates ? c.coordinates.join(", ") : "",
+          c.packageId || "",
+          c.status || "",
+          c.createdAt || "",
+          c.ktpImageUrl || ""
+        ]);
+        
+        if (c.payments && c.payments.length > 0) {
+          c.payments.forEach(function(p) {
+            sheetPayments.appendRow([
+              p.id || "",
+              c.id || "",
+              c.name || "",
+              p.date || "",
+              p.amount || 0,
+              p.status || "",
+              p.billingPeriod || "",
+              p.method || "",
+              p.transactionId || "",
+              p.proofOfPaymentUrl || ""
+            ]);
+          });
+        }
+      });
+    }
+    
+    // 3. SUPPORT TICKETS
+    if (data.tickets) {
+      var sheetTickets = getOrCreateSheet("Tiket_Dukungan", [
+        "ID Tiket", "ID Pelanggan", "Nama Pengirim", "Email", "No Handphone", "Pesan Pengaduan", "Tanggal Pengaduan", "Status"
+      ]);
+      if (sheetTickets.getLastRow() > 1) {
+        sheetTickets.deleteRows(2, sheetTickets.getLastRow() - 1);
+      }
+      data.tickets.forEach(function(t) {
+        sheetTickets.appendRow([
+          t.id || "",
+          t.userId || "",
+          t.userName || "",
+          t.email || "",
+          t.phone || "",
+          t.message || "",
+          t.date || "",
+          t.status || ""
+        ]);
+      });
+    }
+    
+    // 4. BROADBAND PACKAGES
+    if (data.packages) {
+      var sheetPackages = getOrCreateSheet("Paket_Internet", [
+        "ID Paket", "Nama Layanan", "Kecepatan", "Harga Bulanan Rp", "Kategori Tipe", "Daftar Fitur", "Rekomendasi Populer"
+      ]);
+      if (sheetPackages.getLastRow() > 1) {
+        sheetPackages.deleteRows(2, sheetPackages.getLastRow() - 1);
+      }
+      data.packages.forEach(function(p) {
+        sheetPackages.appendRow([
+          p.id || "",
+          p.name || "",
+          p.speed || "",
+          p.price || 0,
+          p.type || "",
+          p.features ? p.features.join(", ") : "",
+          p.popular ? "Ya" : "Tidak"
+        ]);
+      });
+    }
+    
+    // 5. COVERAGE AREAS
+    if (data.coverage) {
+      var sheetCoverage = getOrCreateSheet("Cakupan_Wilayah", [
+        "Nama Kota / Kabupaten", "Tipe Wilayah", "Total Kecamatan", "Total Kelurahan Tercover"
+      ]);
+      if (sheetCoverage.getLastRow() > 1) {
+        sheetCoverage.deleteRows(2, sheetCoverage.getLastRow() - 1);
+      }
+      data.coverage.forEach(function(cov) {
+        sheetCoverage.appendRow([
+          cov.cityName || "",
+          cov.regionType || "",
+          cov.totalKecamatan || 0,
+          cov.totalKelurahan || 0
+        ]);
+      });
+    }
+    
+    // 6. CUSTOMER TESTIMONIALS
+    if (data.testimonials) {
+      var sheetTestimonials = getOrCreateSheet("Testimoni_Pelanggan", [
+        "ID Testimoni", "Nama Pengulas", "Role / Paket", "Lokasi", "Rating Bintang", "Isi Ulasan", "Tag Kategori", "Tanggal"
+      ]);
+      if (sheetTestimonials.getLastRow() > 1) {
+        sheetTestimonials.deleteRows(2, sheetTestimonials.getLastRow() - 1);
+      }
+      data.testimonials.forEach(function(testi) {
+        sheetTestimonials.appendRow([
+          testi.id || "",
+          testi.name || "",
+          testi.role || "",
+          testi.location || "",
+          testi.rating || 5,
+          testi.text || "",
+          testi.tag || "",
+          testi.createdAt || ""
+        ]);
+      });
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ status: "success", fileUrl: file ? file.getUrl() : "" }))
-      .setMimeType(ContentService.MimeType.JSON);
+    // Google Drive Integration for base64 images (Optional new member KTP Upload)
+    var createdFileUrl = "";
+    if (data.ktpImageBase64 && data.name) {
+      try {
+        var folderName = "Patasnet_KTP_Uploads";
+        var folders = DriveApp.getFoldersByName(folderName);
+        var targetFolder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+        
+        var base64Data = data.ktpImageBase64.split(",")[1];
+        var contentType = data.ktpImageBase64.split(",")[0].split(":")[1].split(";")[0];
+        var decoded = Utilities.base64Decode(base64Data);
+        var blob = Utilities.newBlob(decoded, contentType, "KTP_" + data.name + "_" + Math.floor(1000 + Math.random() * 9000) + ".jpg");
+        
+        var file = targetFolder.createFile(blob);
+        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        createdFileUrl = file.getUrl();
+      } catch (driveErr) {
+        // Ignored or logged internally
+      }
+    }
+    
+    // Auto-fit column widths across all processed sheets
+    var sheetsList = ss.getSheets();
+    sheetsList.forEach(function(sh) {
+      if (sh.getLastColumn() > 0) {
+        sh.autoResizeColumns(1, sh.getLastColumn());
+      }
+    });
+
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: "success", 
+      message: "Sinkronisasi database spreadsheet berhasil! Seluruh sheet (" + sheetsList.length + ") otomatis dibuat dan diformat dengan sempurna.",
+      fileUrl: createdFileUrl 
+    })).setMimeType(ContentService.MimeType.JSON);
+    
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: "error", 
+      message: "Terjadi gangguan: " + err.toString() 
+    })).setMimeType(ContentService.MimeType.JSON);
   }
 }`;
     navigator.clipboard.writeText(scriptCode);
-    alert('Kode Google Apps Script disalin ke clipboard! Silakan buka script.google.com dan buat Web App baru.');
+    alert('Kode Google Apps Script Super Cerdas berhasil disalin ke clipboard!\n\nSeluruh tabel (Pengaturan_Sistem, Pelanggan, Tagihan_Pembayaran, Tiket_Dukungan, Paket_Internet, Cakupan_Wilayah, Testimoni_Pelanggan) akan OTOMATIS dibuat dan diatur di Spreadsheet Anda ketika sinkronisasi dipicu.');
   };
 
   return (
@@ -723,6 +1169,38 @@ function doPost(e) {
                   )}
                 </button>
               </form>
+
+              {/* Google Sheets Cloud Synchronization Container inside Dev Dashboard */}
+              <div className="pt-6 border-t border-slate-800 space-y-4">
+                <h4 className="font-bold text-slate-200 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                  <Database className="w-4 h-4 text-blue-400" />
+                  Koneksi & Sinkronisasi Cloud Instan:
+                </h4>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Jika Anda sedang membuka aplikasi di HP baru atau Laptop lain, Anda dapat menarik data kustomisasi logo, nama perusahaan, daftar pelanggan, tagihan pembayaran, paket wifi, dan tiket pengaduan langsung dari Google Spreadsheet untuk disinkronkan ke local storage dan server database secara otomatis.
+                </p>
+                <div className="space-y-3 p-4 bg-slate-950 border border-slate-800 rounded-2xl">
+                  <button
+                    type="button"
+                    onClick={handleLinkAndSyncDatabase}
+                    disabled={syncLoading}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 text-white rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-2"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${syncLoading ? 'animate-spin' : ''}`} />
+                    {syncLoading ? 'Sinkronisasi Cloud...' : 'Hubungkan & Tarik Seluruh Data Spreadsheet'}
+                  </button>
+                  {syncSuccessMessage && (
+                    <p className="text-xs text-emerald-400 font-bold bg-emerald-950/20 p-3 rounded-xl border border-emerald-900/30 leading-normal">
+                      ✓ {syncSuccessMessage}
+                    </p>
+                  )}
+                  {syncErrorMessage && (
+                    <p className="text-xs text-red-400 font-bold bg-red-950/20 p-3 rounded-xl border border-red-900/30 leading-normal">
+                      ✗ {syncErrorMessage}
+                    </p>
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </main>
