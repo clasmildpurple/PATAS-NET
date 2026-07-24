@@ -86,22 +86,102 @@ export default function AdminDashboard({
   const [sheetSyncState, setSheetSyncState] = useState<'idle' | 'syncing' | 'success'>('success');
   const [lastSyncTime, setLastSyncTime] = useState<string>('Baru saja');
 
+  const performDatabaseSync = async (forceClearCache = false) => {
+    setSheetSyncState('syncing');
+    try {
+      if (forceClearCache) {
+        localStorage.removeItem('db_customers');
+        localStorage.removeItem('db_tickets');
+        localStorage.removeItem('db_packages');
+        localStorage.removeItem('db_coverage_areas');
+        localStorage.removeItem('db_testimonials');
+        localStorage.removeItem('db_company_settings');
+        localStorage.removeItem('db_whatsapp_logs');
+      }
+
+      // Check for connected Google Sheets Web App URL
+      let webhookUrl = (companySettings as any)?.appScriptWebhookUrl;
+      if (!webhookUrl) {
+        try {
+          const stored = localStorage.getItem('db_company_settings');
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            webhookUrl = parsed.appScriptWebhookUrl;
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      if (webhookUrl && webhookUrl.trim().startsWith('https://script.google.com/')) {
+        try {
+          const response = await fetch(webhookUrl.trim(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'load' })
+          });
+          if (response.ok) {
+            const data = await response.json();
+            if (data && data.status === 'success') {
+              if (Array.isArray(data.customers)) {
+                localStorage.setItem('db_customers', JSON.stringify(data.customers));
+              }
+              if (Array.isArray(data.tickets)) {
+                localStorage.setItem('db_tickets', JSON.stringify(data.tickets));
+              }
+              if (Array.isArray(data.packages)) {
+                localStorage.setItem('db_packages', JSON.stringify(data.packages));
+              }
+              if (Array.isArray(data.coverage)) {
+                localStorage.setItem('db_coverage_areas', JSON.stringify(data.coverage));
+              }
+              if (Array.isArray(data.testimonials)) {
+                localStorage.setItem('db_testimonials', JSON.stringify(data.testimonials));
+              }
+              if (data.companySettings) {
+                localStorage.setItem('db_company_settings', JSON.stringify(data.companySettings));
+              }
+              window.dispatchEvent(new Event('storage'));
+            }
+          }
+        } catch (err) {
+          console.warn('Sync with Google Sheets background attempt warning:', err);
+        }
+      }
+
+      // Always call parent refresh functions to update React state
+      await onRefreshData();
+      if (onRefreshPackages) {
+        await onRefreshPackages();
+      }
+
+      const now = new Date();
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      setLastSyncTime(`${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`);
+      setSheetSyncState('success');
+
+      if (forceClearCache) {
+        setSuccessToastMessage('Database berhasil di-refresh! Cache lokal dibersihkan & data terbaru dimuat dari Google Sheets/Server.');
+        setTimeout(() => setSuccessToastMessage(null), 5000);
+      }
+    } catch (err) {
+      console.error('Failed to sync database:', err);
+      setSheetSyncState('idle');
+    }
+  };
+
   useEffect(() => {
     const now = new Date();
     const pad = (n: number) => n.toString().padStart(2, '0');
-    setLastSyncTime(`${pad(now.getHours())}:${pad(now.getMinutes())}`);
+    setLastSyncTime(`${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`);
 
+    // Periodic background sync every 30 seconds
     const interval = setInterval(() => {
-      setSheetSyncState('syncing');
-      setTimeout(() => {
-        const timeNow = new Date();
-        setLastSyncTime(`${pad(timeNow.getHours())}:${pad(timeNow.getMinutes())}:${pad(timeNow.getSeconds())}`);
-        setSheetSyncState('success');
-      }, 2500);
-    }, 40000);
+      performDatabaseSync(false);
+    }, 30000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [onRefreshData, onRefreshPackages, companySettings]);
 
   // Count payments waiting for verification
   const pendingPaymentsCount = customers.reduce(
@@ -1002,7 +1082,7 @@ export default function AdminDashboard({
 
             <div 
               className="flex items-center gap-2.5 px-3 py-1.5 bg-slate-800/80 hover:bg-slate-800/90 border border-slate-700/70 rounded-xl text-[10px] select-none transition-all duration-300 shrink-0"
-              title="Sistem Backup database otomatis ke Google Sheets"
+              title="Sistem Sinkronisasi otomatis database setiap 30 detik ke Google Sheets & Backend"
             >
               {sheetSyncState === 'syncing' ? (
                 <div className="relative flex items-center justify-center">
@@ -1015,7 +1095,7 @@ export default function AdminDashboard({
                 </div>
               )}
               <div className="text-left leading-none font-sans">
-                <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-extrabold">Auto-Backup Sheet</span>
+                <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-extrabold">Auto-Sync (30s)</span>
                 <span className={`font-black tracking-tight ${sheetSyncState === 'syncing' ? 'text-yellow-400' : 'text-emerald-400'}`}>
                   {sheetSyncState === 'syncing' ? 'Menyinkronkan...' : `Tersambung (${lastSyncTime})`}
                 </span>
@@ -1023,20 +1103,14 @@ export default function AdminDashboard({
             </div>
 
             <button
-              onClick={() => {
-                setSheetSyncState('syncing');
-                onRefreshData();
-                setTimeout(() => {
-                  const timeNow = new Date();
-                  const pad = (n: number) => n.toString().padStart(2, '0');
-                  setLastSyncTime(`${pad(timeNow.getHours())}:${pad(timeNow.getMinutes())}:${pad(timeNow.getSeconds())}`);
-                  setSheetSyncState('success');
-                }, 1500);
-              }}
-              className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all border border-slate-700 active:scale-95 shrink-0"
-              title="Sinkronisasi Data Baru"
+              type="button"
+              onClick={() => performDatabaseSync(true)}
+              disabled={sheetSyncState === 'syncing'}
+              className="px-3.5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold transition-all shadow-md flex items-center gap-1.5 text-[11px] disabled:opacity-50 shrink-0 active:scale-95"
+              title="Bersihkan cache lokal & paksa tarik ulang database dari Google Sheets / Server"
             >
-              <RefreshCw className={`w-4 h-4 ${sheetSyncState === 'syncing' ? 'animate-spin text-yellow-400' : ''}`} />
+              <Database className={`w-4 h-4 ${sheetSyncState === 'syncing' ? 'animate-spin text-yellow-300' : ''}`} />
+              <span>Refresh Database</span>
             </button>
             <button
               onClick={handleExportToExcel}

@@ -894,6 +894,32 @@ async function simulateApi(url: string, init?: RequestInit): Promise<Response> {
     return createJSONResponse({ status: 'success', coverage });
   }
 
+  // 25. GET /api/dev/db
+  if (path === '/api/dev/db' && method === 'GET') {
+    return createJSONResponse({
+      customers,
+      tickets,
+      passwords,
+      companySettings: settings,
+      coverageList: coverage,
+      packages,
+      testimonials
+    });
+  }
+
+  // 26. POST /api/dev/db/save
+  if (path === '/api/dev/db/save' && method === 'POST') {
+    const { customers: c, tickets: t, passwords: p, settings: s, packages: pkg, coverage: cov, testimonials: testm } = body || {};
+    if (c) setStorage('customers', c);
+    if (t) setStorage('tickets', t);
+    if (p) setStorage('passwords', p);
+    if (s) setStorage('company_settings', s);
+    if (pkg) setStorage('packages', pkg);
+    if (cov) setStorage('coverage_areas', cov);
+    if (testm) setStorage('testimonials', testm);
+    return createJSONResponse({ status: 'success', message: 'Raw database override success!' });
+  }
+
   // Default fallback for unmatched api routes
   return createJSONResponse({ status: 'error', message: 'Resource not found' }, 404);
 }
