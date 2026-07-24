@@ -1,6 +1,8 @@
 // Client-side API fallback interceptor for static deployments (Vercel, etc.)
 // Overrides window.fetch to simulate a full backend in local storage when server is missing.
 
+import { DEFAULT_COMPANY_SETTINGS } from './defaultCompanySettings';
+
 const ORIGINAL_FETCH = window.fetch;
 
 // Helper to encrypt password matching Node.js SHA-256 hex digest
@@ -12,18 +14,7 @@ async function sha256(message: string): Promise<string> {
 }
 
 // Initial default seeds
-const SEED_COMPANY_SETTINGS = {
-  name: 'Taranet WiFi',
-  address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
-  logoText: 'TARANET',
-  themeColor: '#2563eb',
-  logoUrl: '',
-  appScriptWebhookUrl: '',
-  promos: [],
-  tagline: 'ULTRA BROADBAND',
-  billingDate: 20,
-  contactPhone: '+62 899-3299-977'
-};
+const SEED_COMPANY_SETTINGS = DEFAULT_COMPANY_SETTINGS;
 
 const SEED_PACKAGES = [
   {
